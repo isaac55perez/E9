@@ -1,0 +1,35 @@
+# Python virtual environment
+.venv/
+venv/
+ENV/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# IDE specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Operating System
+.DS_Store
+Thumbs.db
+
+# Generated plots and data
+*.csv
+*.dat
+
+# Exclude all PNGs except our pattern detection analysis
+*.png
+!figures/pattern_detection_analysis.png
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
