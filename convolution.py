@@ -32,9 +32,10 @@ def create_filter(signal, center_position, filter_length, samples_per_period, fi
         return signal[filter_start:filter_end], filter_start
 
 def find_zero_crossings(signal):
-    """Find the exact zero crossing points in a signal."""
-    # Find where the signal changes sign
-    zero_crossings = np.where(np.diff(np.signbit(signal)))[0]
+    """Find the rising zero crossing points in a signal (low to high transitions)."""
+    # Find where the signal changes sign from negative to positive
+    zero_crossings = np.where((signal[:-1] < 0) & (signal[1:] > 0))[0]
+    
     # Interpolate to get more precise zero crossing points
     precise_crossings = []
     for zc in zero_crossings:
@@ -47,7 +48,7 @@ def find_zero_crossings(signal):
                 precise_crossings.append(precise_x)
     return np.array(precise_crossings)
 
-def analyze_filter(signal, filter_vector, samples_per_period, threshold=0.5, filter_type="normal"):
+def analyze_filter(signal, filter_vector, samples_per_period, threshold=0.5, filter_type="normal", name=""):
     """
     Analyze how well a filter detects patterns in the signal.
     
@@ -57,6 +58,7 @@ def analyze_filter(signal, filter_vector, samples_per_period, threshold=0.5, fil
         samples_per_period: Number of samples per period
         threshold: Minimum peak height relative to maximum
         filter_type: Type of filter being used
+        name: Name of the filter for adaptive thresholding
     """
     # Perform convolution
     conv = np.convolve(signal, filter_vector, mode='same')
@@ -64,19 +66,104 @@ def analyze_filter(signal, filter_vector, samples_per_period, threshold=0.5, fil
     # Normalize convolution to range [-1, 1]
     conv = conv / np.max(np.abs(conv))
     
+    # Initialize properties
+    properties = {}
+    
+    # Adjust threshold based on filter type and signal region
+    if "Long Peak" in name:
+        # Lower threshold for long peak filter due to broader correlation peaks
+        base_threshold = 0.3
+        
+        # Adaptive threshold for noisy regions
+        # Use a rolling window to detect high-variance regions
+        window_size = samples_per_period // 4
+        rolling_std = np.array([np.std(signal[max(0, i-window_size):min(len(signal), i+window_size)]) 
+                              for i in range(len(signal))])
+        
+        # Create an adaptive threshold based on local signal variance
+        is_noisy = rolling_std > np.median(rolling_std) * 1.5
+        adaptive_threshold = np.where(is_noisy, base_threshold * 0.7, base_threshold)
+        
+        # Use minimum distance of 60% of period in noisy regions to catch more peaks
+        min_distance = int(samples_per_period * (0.6 if np.any(is_noisy) else 0.8))
+        
+        # Store noise information for visualization
+        properties.update({
+            "is_noisy": is_noisy,
+            "rolling_std": rolling_std,
+            "adaptive_threshold": adaptive_threshold
+        })
+        
+        threshold = base_threshold
+    elif "Falling Slope" in name:
+        # More sensitive parameters for falling slope detection
+        threshold = 0.2  # Lower threshold to catch slopes
+        min_distance = int(samples_per_period * 0.8)  # Minimum distance between detections
+        
+        # Calculate slope of signal for better detection
+        signal_slope = np.gradient(signal)
+        slope_conv = np.convolve(signal_slope, filter_vector, mode='same')
+        slope_conv = slope_conv / np.max(np.abs(slope_conv))
+        
+        # Update convolution to focus on negative slopes
+        conv = -slope_conv  # Negative slopes will now appear as positive peaks
+        
+        properties.update({
+            "slope_based": True
+        })
+    else:
+        min_distance = samples_per_period//2
+    
     if filter_type == "zero_crossing":
-        # For zero crossings, look for both positive and negative peaks
-        # This helps detect both rising and falling zero crossings
-        peaks_pos, properties_pos = find_peaks(conv, height=threshold, distance=samples_per_period//4)
-        peaks_neg, properties_neg = find_peaks(-conv, height=threshold, distance=samples_per_period//4)
-        peaks = np.sort(np.concatenate([peaks_pos, peaks_neg]))
+        # For zero crossings, use a lower threshold and smaller minimum distance
+        threshold = 0.2  # Lower threshold for zero crossings
+        min_distance = samples_per_period // 2  # Distance between rising crossings
+        
+        # Find only positive peaks (corresponding to rising zero crossings)
+        peaks, properties_pos = find_peaks(conv, height=threshold, distance=min_distance,
+                                         prominence=0.1)  # Add prominence requirement
         
         # Get actual zero crossings for comparison
         true_crossings = find_zero_crossings(signal)
-        properties = {"true_crossings": true_crossings}
+        
+        # Calculate detection accuracy
+        max_distance = samples_per_period // 8  # Max distance for matching peaks to crossings
+        detected_crossings = []
+        missed_crossings = []
+        
+        for tc in true_crossings:
+            # Find closest peak to this crossing
+            if len(peaks) > 0:
+                min_dist = np.min(np.abs(peaks - tc))
+                if min_dist < max_distance:
+                    detected_crossings.append(tc)
+                else:
+                    missed_crossings.append(tc)
+            else:
+                missed_crossings.append(tc)
+        
+        detection_rate = len(detected_crossings) / len(true_crossings) if len(true_crossings) > 0 else 0
+        
+        properties = {
+            "true_crossings": true_crossings,
+            "detected_crossings": np.array(detected_crossings),
+            "missed_crossings": np.array(missed_crossings),
+            "detection_rate": detection_rate,
+            "threshold": threshold,
+            "min_distance": min_distance
+        }
     else:
-        # For other patterns, just look for positive peaks
-        peaks, properties = find_peaks(conv, height=threshold, distance=samples_per_period//2)
+        # For other patterns, look for positive peaks
+        peaks, properties = find_peaks(conv, height=threshold, distance=min_distance)
+    
+    # Add debug information
+    properties = {} if properties is None else properties
+    properties.update({
+        "threshold": threshold,
+        "min_distance": min_distance,
+        "conv_max": np.max(conv),
+        "conv_min": np.min(conv)
+    })
     
     return conv, peaks, properties
 
@@ -134,27 +221,18 @@ def main():
     signal = create_composite_signal(num_periods, samples_per_period)
 
     # 2. Create filters at different positions and lengths
+    # Position reference:
+    # Order matters: filters will be displayed in this order from top to bottom
     filter_positions = [
-        (0.25, 20, "Short Peak Filter", "normal"),
-        (0.25, 40, "Long Peak Filter", "normal"),
-        (0.0, 30, "Zero Crossing", "zero_crossing"),
-        (0.125, 30, "Rising Slope", "normal"),
-        (0.375, 30, "Falling Slope", "normal"),
+        (0.0, 30, "Zero Crossing", "zero_crossing"),    # First plot after signal
+        (0.33, 20, "Falling Slope", "normal"),         # Second plot
+        (0.25, 40, "Long Peak Filter", "normal"),      # Third plot
     ]
     
     filters = []
     for pos, length, name, ftype in filter_positions:
         filt, start = create_filter(signal, pos, length, samples_per_period, filter_type=ftype)
         filters.append((filt, start, name, length, ftype))
-
-    # 2. Create filters at different positions and lengths
-    filter_positions = [
-        (0.25, 20, "Short Peak Filter", "normal"),
-        (0.25, 40, "Long Peak Filter", "normal"),
-        (0.0, 30, "Zero Crossing", "zero_crossing"),
-        (0.125, 30, "Rising Slope", "normal"),
-        (0.375, 30, "Falling Slope", "normal"),
-    ]
     
     # Set style parameters
     plt.rcParams['axes.grid'] = True
@@ -164,13 +242,44 @@ def main():
     
     # Create figure with subplots
     num_filters = len(filters)
-    fig = plt.figure(figsize=(15, 4 + 3*num_filters))
-    gs = plt.GridSpec(2 + num_filters, 1, height_ratios=[2] + [1]*num_filters + [2])
+    fig = plt.figure(figsize=(15, 2 + 4 + 3*num_filters))  # Added height for filter bank
+    gs = plt.GridSpec(3 + num_filters, 1, height_ratios=[1.5, 2] + [1]*num_filters + [2])
     
-    # Plot original signal with all filters
-    ax_signal = fig.add_subplot(gs[0])
+    # Create filter bank subplot
+    ax_filters = fig.add_subplot(gs[0])
+    ax_filters.set_title('Filter Bank', fontsize=10, pad=10, fontweight='bold')
+    ax_filters.axhline(y=0, color='#666666', linestyle='-', linewidth=0.5, zorder=1)
+    
+    # Plot filters side by side
+    filter_spacing = 50
+    current_pos = 0
+    for i, (filt, start, name, length, ftype) in enumerate(filters):
+        # Plot filter with enhanced styling
+        filter_x = np.arange(len(filt)) + current_pos
+        ax_filters.plot(filter_x, filt, color=colors[i], linewidth=2.5, 
+                      label=name, solid_capstyle='round', zorder=4)
+        # Add a light background for each filter
+        ax_filters.fill_between(filter_x, filt, alpha=0.2, 
+                             color=colors[i], zorder=3)
+        current_pos += len(filt) + filter_spacing
+    
+    ax_filters.grid(True, alpha=0.3)
+    ax_filters.legend(loc='center left', bbox_to_anchor=(1.02, 0.5))
+    ax_filters.set_ylabel('Amplitude')
+    ax_filters.set_xlabel('Filter Samples')
+    
+    # Plot original signal
+    ax_signal = fig.add_subplot(gs[1])
     ax_signal.plot(range(len(signal)), signal, color='#2F4F4F', linewidth=2, 
                   label='Signal', zorder=3)
+    
+    # Pre-compute all convolutions
+    all_convolutions = []
+    for filt, _, name, _, ftype in filters:
+        threshold = 0.3 if ftype == "zero_crossing" else 0.5
+        conv, peaks, properties = analyze_filter(signal, filt, samples_per_period, 
+                                              threshold=threshold, filter_type=ftype, name=name)
+        all_convolutions.append((conv, peaks, properties, name))
     
     # Add horizontal line at y=0
     ax_signal.axhline(y=0, color='#666666', linestyle='-', linewidth=0.5, zorder=1)
@@ -195,51 +304,45 @@ def main():
                     add_annotation_arrow(ax_signal, zc, 0, "Falling\nZero Crossing",
                                       dx=-30, dy=20, connectionstyle="arc3,rad=-0.2")
     
-    # Plot filters on the left side with enhanced styling
+    # Calculate max filter length for reference
     max_length = max(f[3] for f in filters)
-    
-    # Create a shaded region for the filter display area
-    filter_area_start = -(num_filters+1)*(max_length+10)
-    ax_signal.axvspan(filter_area_start, 0, color='#F5F5F5', alpha=0.5, zorder=1)
-    
-    # Add "Filter Bank" label
-    ax_signal.text(filter_area_start/2, 1.7, "Filter Bank",
-                  horizontalalignment='center', fontsize=10,
-                  bbox=dict(facecolor='white', edgecolor='#666666',
-                          alpha=0.8, boxstyle='round,pad=0.5'))
-    
-    for i, (filt, start, name, length, ftype) in enumerate(filters):
-        filter_x = np.arange(-len(filt), 0)
-        offset = -(i+1) * (max_length + 10)
-        # Plot filter with enhanced styling
-        ax_signal.plot(filter_x + offset, filt, color=colors[i], linewidth=2.5, 
-                      label=name, solid_capstyle='round', zorder=4)
-        # Add a light background for each filter
-        ax_signal.fill_between(filter_x + offset, filt, alpha=0.2, 
-                             color=colors[i], zorder=3)
-        
-        # Add filter characteristics annotation
-        if ftype == "zero_crossing":
-            add_annotation_arrow(ax_signal, filter_x[0] + offset, 0,
-                               f"Length: {length} samples\nType: Zero Crossing\nCaptures full transition",
-                               dx=-40, dy=-30, connectionstyle="arc3,rad=-0.2")
     
     ax_signal.grid(True, alpha=0.3)
     ax_signal.legend(loc='upper right')
     ax_signal.set_xlabel('Sample Index')
     ax_signal.set_ylabel('Amplitude')
-    ax_signal.set_title('Original Signal with Different Filters')
-    ax_signal.set_xlim(-(num_filters+1)*(max_length+10), total_samples+5)
+    ax_signal.set_title('Original Signal')
+    ax_signal.set_xlim(-5, total_samples + 5)
 
     # Analyze and plot each filter's results
     detection_results = []
     for i, (filt, _, name, length, ftype) in enumerate(filters):
         # Analyze filter performance
         threshold = 0.3 if ftype == "zero_crossing" else 0.5  # Lower threshold for zero crossings
-        conv, peaks, properties = analyze_filter(signal, filt, samples_per_period, threshold=threshold, filter_type=ftype)
+        conv, peaks, properties = analyze_filter(signal, filt, samples_per_period, 
+                                              threshold=threshold, filter_type=ftype, name=name)
         
         # Create subplot for this filter's convolution
         ax = fig.add_subplot(gs[i+1])
+        
+        # Plot all convolutions with lower alpha
+        for j, (other_conv, other_peaks, _, other_name) in enumerate(all_convolutions):
+            if j != i:  # Plot other convolutions with medium alpha
+                ax.plot(range(len(other_conv)), other_conv, color=colors[j], 
+                       linewidth=1, alpha=0.5, label=f'{other_name}')
+                if len(other_peaks) > 0:
+                    ax.plot(other_peaks, other_conv[other_peaks], 'o', 
+                           color=colors[j], markersize=4, alpha=0.5,
+                           markeredgecolor='white', markeredgewidth=0.5)
+        
+        # Plot current convolution with full alpha
+        ax.plot(range(len(conv)), conv, color=colors[i], linewidth=2, 
+               label=f'{name} (current)', zorder=3)
+               
+        # Set y-axis limits to be symmetric around zero
+        max_abs_val = max(abs(np.min([c[0] for c in all_convolutions])), 
+                         abs(np.max([c[0] for c in all_convolutions])))
+        ax.set_ylim(-max_abs_val * 1.1, max_abs_val * 1.1)  # Add 10% padding
         
         # Plot convolution result
         ax.plot(range(len(conv)), conv, color=colors[i], linewidth=1, alpha=0.7, label=f'{name} Conv.')
@@ -285,14 +388,29 @@ def main():
             accuracy = matches / len(true_crossings) if len(true_crossings) > 0 else 0
             
             # Plot matched and unmatched crossings differently
-            if matched_crossings:
-                ax.vlines(matched_crossings, ax.get_ylim()[0], ax.get_ylim()[1],
+            detected = properties.get("detected_crossings", [])
+            missed = properties.get("missed_crossings", [])
+            
+            if len(detected) > 0:
+                ax.vlines(detected, ax.get_ylim()[0], ax.get_ylim()[1],
                          colors='#90EE90', linestyles='--', alpha=0.3, 
-                         label='Matched Crossings', zorder=2)
-            if unmatched_crossings:
-                ax.vlines(unmatched_crossings, ax.get_ylim()[0], ax.get_ylim()[1],
+                         label='Detected Crossings', zorder=2)
+            if len(missed) > 0:
+                ax.vlines(missed, ax.get_ylim()[0], ax.get_ylim()[1],
                          colors='#FFB6C1', linestyles='--', alpha=0.3,
                          label='Missed Crossings', zorder=2)
+            
+            # Add detection rate information
+            detection_rate = properties.get("detection_rate", 0)
+            ax.text(0.02, 0.98, 
+                   f"Detection Parameters:\n"
+                   f"Threshold: {properties['threshold']:.2f}\n"
+                   f"Min Distance: {properties['min_distance']} samples\n"
+                   f"Detection Rate: {detection_rate:.1%}",
+                   transform=ax.transAxes, fontsize=8,
+                   bbox=dict(facecolor='white', alpha=0.8,
+                           edgecolor='#666666', boxstyle='round,pad=0.5'),
+                   verticalalignment='top')
             
             # Add accuracy indicator with color coding
             accuracy_color = plt.cm.RdYlGn(accuracy)
@@ -318,6 +436,36 @@ def main():
                                   "Missed Detection:\nWeak correlation",
                                   dx=-40, dy=-20,
                                   connectionstyle="arc3,rad=-0.2")
+        
+        # Add detection parameters for long peak filter
+        if "Long Peak" in name:
+            # Highlight noisy regions if detected
+            if "is_noisy" in properties:
+                noisy_regions = properties["is_noisy"]
+                # Create spans for noisy regions
+                in_noisy = False
+                start_idx = 0
+                for i, is_noisy in enumerate(noisy_regions):
+                    if is_noisy and not in_noisy:
+                        start_idx = i
+                        in_noisy = True
+                    elif not is_noisy and in_noisy:
+                        ax.axvspan(start_idx, i, color='red', alpha=0.1, zorder=1)
+                        in_noisy = False
+                if in_noisy:  # If we end in a noisy region
+                    ax.axvspan(start_idx, len(noisy_regions), color='red', alpha=0.1, zorder=1)
+            
+            info_text = (f"Detection Parameters:\n"
+                        f"Base Threshold: {properties['threshold']:.2f}\n"
+                        f"Min Distance: {properties['min_distance']} samples\n"
+                        f"Max Conv: {properties['conv_max']:.2f}\n"
+                        f"Min Conv: {properties['conv_min']:.2f}\n"
+                        f"Adaptive: Lower threshold in noisy regions")
+            ax.text(0.02, 0.98, info_text,
+                   transform=ax.transAxes, fontsize=8,
+                   bbox=dict(facecolor='white', alpha=0.8,
+                           edgecolor='#666666', boxstyle='round,pad=0.5'),
+                   verticalalignment='top')
             
             # Add explanation of convolution values
             ax.text(0.98, 0.98,

@@ -192,6 +192,34 @@ This document captures the key points of discussion about using convolution for 
 
 **A:** Yes, convolution is indeed a powerful method for detecting any pattern within a signal, not just peaks! The convolution operation measures the similarity between the filter and every possible segment of the signal. When the filter matches well with a segment of the signal, the convolution output will show a higher value at that position.
 
+## Recent Improvements (October 4, 2025)
+
+### 1. Filter Order and Visualization
+- Reordered filter display and analysis:
+  1. Zero Crossing Detection (first after signal)
+  2. Falling Slope Detection (second)
+  3. Long Peak Detection (third)
+- Improved visualization clarity with consistent y-axis scaling
+- Enhanced transparency for comparison convolutions
+
+### 2. Zero Crossing Detection Enhancement
+- Modified to detect only rising zero crossings
+- Improved threshold and prominence parameters
+- Added detailed detection statistics
+- Clear visualization of matched vs missed crossings
+
+### 3. Falling Slope Detection Optimization
+- Repositioned to 0.33 of period (after peak)
+- Shortened filter length to 20 samples for precision
+- Implemented slope-based detection using gradient
+- Better temporal separation from peak detections
+
+### 4. Long Peak Detection Improvements
+- Maintained position at 0.25 of period
+- Added adaptive thresholding for noisy regions
+- Enhanced visualization of detection parameters
+- Improved handling of varying signal conditions
+
 ## Key Concepts Explained
 
 ### 1. Pattern Matching Flexibility
